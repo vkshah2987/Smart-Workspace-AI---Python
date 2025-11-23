@@ -1,0 +1,20 @@
+fastapi
+uvicorn[standard]
+python-multipart
+aiofiles
+pydantic
+requests
+motor            # async Mongo client for FastAPI
+pymongo          # sync Mongo client for worker + faiss service
+redis
+rq
+python-docx
+pdfplumber
+pandas
+faiss-cpu
+sentence-transformers
+python-magic
+python-dotenv
+google
+google-genai
+debugpy

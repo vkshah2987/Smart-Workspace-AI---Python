@@ -1,0 +1,66 @@
+# version: "3.8"
+services:
+  api:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.api
+    volumes:
+      - ./uploads:/app/uploads
+    ports:
+      - "8000:8000"
+    env_file: .env
+    depends_on:
+      - redis
+      - mongo
+      - faiss
+      - reranker
+
+  worker:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.worker
+    volumes:
+      - ./uploads:/app/uploads
+    env_file: .env
+    depends_on:
+      - redis
+      - mongo
+      - faiss
+
+  faiss:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.faiss
+    volumes:
+      - faiss_data:/data
+    ports:
+      - "8001:8001"
+    env_file: .env
+    depends_on:
+      - mongo
+
+  reranker:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.reranker
+    ports:
+      - "8501:8501"
+    env_file: .env
+    depends_on:
+      - redis
+
+  mongo:
+    image: mongo:6.0
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo_data:/data/db
+
+  redis:
+    image: redis:7
+    ports:
+      - "6379:6379"
+
+volumes:
+  mongo_data:
+  faiss_data:
