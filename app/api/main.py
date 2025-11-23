@@ -9,7 +9,12 @@ from .clients.mongo_client import MongoClientWrapper
 from .clients.faiss_client import faiss_search, upsert_vectors, delete_document
 from .clients.gemini_client import embed_query, generate_answer, embed_texts
 from .clients.reranker_client import rerank_candidates
-from .schemas import UploadResponse, QueryRequest, QueryResponse, DocumentListResponse, DocumentInfo, DeleteResponse
+from .session_manager import SessionManager
+from .schemas import (
+    UploadResponse, QueryRequest, QueryResponse, DocumentListResponse, 
+    DocumentInfo, DeleteResponse, SessionListResponse, SessionInfo,
+    SessionDetail, SessionDeleteResponse, ConversationMessage, SessionMetadata
+)
 
 UPLOAD_DIR = os.getenv("UPLOAD_DIR", "app/uploads/")
 Path(UPLOAD_DIR).mkdir(parents=True, exist_ok=True)
@@ -21,6 +26,7 @@ q = Queue("ingest", connection=redis_conn)
 app = FastAPI(title="RAG Workspace AI (Mongo + FAISS)")
 
 mongo = MongoClientWrapper(os.getenv("MONGO_URI", "mongodb://mongo:27017/"), os.getenv("MONGO_DB", "ragdb"))
+session_manager = SessionManager(mongo._sync_db)
 
 @app.post("/upload", response_model=UploadResponse)
 async def upload_file(user_id: str, file: UploadFile = File(...)):
@@ -42,6 +48,30 @@ async def upload_file(user_id: str, file: UploadFile = File(...)):
 @app.post("/query", response_model=QueryResponse)
 async def query(req: QueryRequest):
     try:
+        # Handle session management
+        session_id = req.session_id
+        
+        # Create new session if not provided
+        if not session_id:
+            session_id = session_manager.create_session(req.user_id, req.query_text)
+            print(f"Created new session: {session_id}")
+        else:
+            # Validate existing session
+            session = session_manager.get_session(session_id, req.user_id)
+            if not session:
+                raise HTTPException(
+                    status_code=404, 
+                    detail=f"Session {session_id} not found or doesn't belong to user {req.user_id}"
+                )
+            # Add user message to existing session
+            session_manager.add_message(session_id, req.user_id, "user", req.query_text)
+            print(f"Continuing session: {session_id}")
+        
+        # Get conversation context for LLM
+        conversation_context = session_manager.build_context_prompt(
+            session_id, req.user_id, max_history=5
+        )
+        
         print("Reached till here 0")
         q_emb = embed_query(req.query_text)
         print("Reached till here 0.1")
@@ -65,13 +95,29 @@ async def query(req: QueryRequest):
 
         print("Reached till here 3")
 
-        answer = generate_answer(req.query_text, contexts)
+        # Generate answer with conversation context
+        answer = generate_answer(req.query_text, contexts, conversation_context)
         sources = [{"doc_id": c["doc_id"], "chunk_id": c["chunk_id"], "score": c.get("score", None)} for c in top_k]
 
         print("Reached till here 4")
+        
+        # Extract unique document IDs for tracking
+        doc_ids = list(set([s["doc_id"] for s in sources]))
+        
+        # Add assistant response to session
+        session_manager.add_message(
+            session_id, 
+            req.user_id, 
+            "assistant", 
+            answer,
+            sources=sources,
+            doc_ids=doc_ids
+        )
 
-        return QueryResponse(answer=answer, sources=sources)
+        return QueryResponse(answer=answer, sources=sources, session_id=session_id)
 
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -124,6 +170,124 @@ async def delete_document_endpoint(doc_id: str):
         return DeleteResponse(
             doc_id=doc_id,
             message="Document and all associated data deleted successfully",
+            deleted=True
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ===========================
+# Session Management Endpoints
+# ===========================
+
+@app.get("/sessions/{user_id}", response_model=SessionListResponse)
+async def list_sessions(user_id: str, limit: int = 50, skip: int = 0):
+    """
+    List all sessions for a user.
+    
+    Args:
+        user_id: The user identifier
+        limit: Maximum number of sessions to return (default: 50)
+        skip: Number of sessions to skip for pagination (default: 0)
+    """
+    try:
+        sessions = session_manager.list_user_sessions(user_id, limit=limit, skip=skip)
+        
+        # Get total count
+        total = mongo._sync_db.sessions.count_documents({"user_id": user_id})
+        
+        session_infos = [
+            SessionInfo(
+                session_id=s["session_id"],
+                created_at=s["created_at"],
+                updated_at=s["updated_at"],
+                total_queries=s["total_queries"],
+                document_count=s["document_count"],
+                preview=s.get("preview")
+            )
+            for s in sessions
+        ]
+        
+        return SessionListResponse(
+            user_id=user_id,
+            sessions=session_infos,
+            total=total
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/sessions/{user_id}/{session_id}", response_model=SessionDetail)
+async def get_session(user_id: str, session_id: str):
+    """
+    Get detailed information about a specific session including full conversation history.
+    
+    Args:
+        user_id: The user identifier
+        session_id: The session identifier
+    """
+    try:
+        session = session_manager.get_session(session_id, user_id)
+        
+        if not session:
+            raise HTTPException(
+                status_code=404, 
+                detail=f"Session {session_id} not found or doesn't belong to user {user_id}"
+            )
+        
+        # Convert conversation history to schema format
+        conversation = [
+            ConversationMessage(
+                timestamp=msg["timestamp"],
+                role=msg["role"],
+                content=msg["content"],
+                sources=msg.get("sources")
+            )
+            for msg in session.get("conversation_history", [])
+        ]
+        
+        metadata = session.get("metadata", {})
+        
+        return SessionDetail(
+            session_id=session["session_id"],
+            user_id=session["user_id"],
+            created_at=session["created_at"],
+            updated_at=session["updated_at"],
+            conversation_history=conversation,
+            metadata=SessionMetadata(
+                total_queries=metadata.get("total_queries", 0),
+                document_references=metadata.get("document_references", [])
+            )
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/sessions/{user_id}/{session_id}", response_model=SessionDeleteResponse)
+async def delete_session(user_id: str, session_id: str):
+    """
+    Delete a session and all its conversation history.
+    
+    Args:
+        user_id: The user identifier
+        session_id: The session identifier
+    """
+    try:
+        deleted = session_manager.delete_session(session_id, user_id)
+        
+        if not deleted:
+            raise HTTPException(
+                status_code=404, 
+                detail=f"Session {session_id} not found or doesn't belong to user {user_id}"
+            )
+        
+        return SessionDeleteResponse(
+            session_id=session_id,
+            message="Session deleted successfully",
             deleted=True
         )
     except HTTPException:

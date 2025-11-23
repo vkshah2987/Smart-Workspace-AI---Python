@@ -55,12 +55,14 @@ A production-ready **Retrieval-Augmented Generation (RAG)** system built with Fa
 ### Core Functionality
 
 - ✅ **Multi-user document management** - Isolated documents per user
+- ✅ **Conversational sessions** - Context-aware multi-turn conversations with session tracking
 - ✅ **Multi-format support** - PDF, DOCX, CSV, TXT
 - ✅ **Async file upload** - Background processing with status tracking
 - ✅ **Hybrid search** - Combines dense (FAISS) + sparse (MongoDB text search)
 - ✅ **Cross-encoder reranking** - Re-scores candidates for better accuracy
 - ✅ **Google Gemini integration** - Embeddings (`gemini-embedding-001`) + Generation (`gemini-2.5-flash`)
 - ✅ **Document lifecycle management** - List, delete, status tracking (`queued` → `indexed`)
+- ✅ **Session management** - Create, list, retrieve, and delete conversation sessions
 - ✅ **Persistent storage** - FAISS index + MongoDB with Docker volumes
 
 ### API Endpoints
@@ -91,13 +93,43 @@ curl -X POST "http://localhost:8000/upload?user_id=vishal" \
 
 ---
 
-#### 2. **POST /query** - Query Documents
-Ask questions and get AI-generated answers with source citations.
+#### 2. **POST /query** - Query Documents (Session-Aware)
+Ask questions and get AI-generated answers with source citations. Supports conversational context.
 
-**Request:**
+**Request (New Session):**
 ```bash
 curl -X POST "http://localhost:8000/query" \
   -H "Content-Type: application/json" \
+  -d '{
+    "user_id": "vishal",
+    "query_text": "What are the main findings?"
+  }'
+```
+
+**Request (Continue Session):**
+```bash
+curl -X POST "http://localhost:8000/query" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "user_id": "vishal",
+    "query_text": "Can you elaborate on that?",
+    "session_id": "a7f3c2b1-4d5e-6f7a-8b9c-0d1e2f3a4b5c"
+  }'
+```
+
+**Response:**
+```json
+{
+  "answer": "Based on the documents...",
+  "sources": [
+    {
+      "doc_id": "6921cff43dcbf65b78dddc99",
+      "chunk_id": "6921cff43dcbf65b78dddc99__0",
+      "score": 0.89
+    }
+  ],
+  "session_id": "a7f3c2b1-4d5e-6f7a-8b9c-0d1e2f3a4b5c"
+}
   -d '{
     "user_id": "vishal",
     "query_text": "What is the main topic of the document?"
@@ -191,6 +223,91 @@ curl -X DELETE "http://localhost:8000/documents/6921cff43dcbf65b78dddc99"
 
 ---
 
+#### 5. **GET /sessions/{user_id}** - List User Sessions
+Retrieve all conversation sessions for a user.
+
+**Request:**
+```bash
+curl "http://localhost:8000/sessions/vishal?limit=10&skip=0"
+```
+
+**Response:**
+```json
+{
+  "user_id": "vishal",
+  "sessions": [
+    {
+      "session_id": "a7f3c2b1-4d5e-6f7a-8b9c-0d1e2f3a4b5c",
+      "created_at": "2025-11-23T10:30:00Z",
+      "updated_at": "2025-11-23T10:45:00Z",
+      "total_queries": 5,
+      "document_count": 3,
+      "preview": "What is the main topic of my documents?"
+    }
+  ],
+  "total": 15
+}
+```
+
+---
+
+#### 6. **GET /sessions/{user_id}/{session_id}** - Get Session Details
+Retrieve full conversation history for a specific session.
+
+**Request:**
+```bash
+curl "http://localhost:8000/sessions/vishal/a7f3c2b1-4d5e-6f7a-8b9c-0d1e2f3a4b5c"
+```
+
+**Response:**
+```json
+{
+  "session_id": "a7f3c2b1-4d5e-6f7a-8b9c-0d1e2f3a4b5c",
+  "user_id": "vishal",
+  "created_at": "2025-11-23T10:30:00Z",
+  "updated_at": "2025-11-23T10:45:00Z",
+  "conversation_history": [
+    {
+      "timestamp": "2025-11-23T10:30:00Z",
+      "role": "user",
+      "content": "What is the main topic?",
+      "sources": null
+    },
+    {
+      "timestamp": "2025-11-23T10:30:15Z",
+      "role": "assistant",
+      "content": "The main topic is...",
+      "sources": [...]
+    }
+  ],
+  "metadata": {
+    "total_queries": 2,
+    "document_references": ["6921cff43dcbf65b78dddc99"]
+  }
+}
+```
+
+---
+
+#### 7. **DELETE /sessions/{user_id}/{session_id}** - Delete Session
+Remove a conversation session and its history.
+
+**Request:**
+```bash
+curl -X DELETE "http://localhost:8000/sessions/vishal/a7f3c2b1-4d5e-6f7a-8b9c-0d1e2f3a4b5c"
+```
+
+**Response:**
+```json
+{
+  "session_id": "a7f3c2b1-4d5e-6f7a-8b9c-0d1e2f3a4b5c",
+  "message": "Session deleted successfully",
+  "deleted": true
+}
+```
+
+---
+
 ## 📁 Project Structure
 
 ```
@@ -201,6 +318,7 @@ rag-fastapi/
 │       ├── main.py              # FastAPI app & endpoints
 │       ├── schemas.py           # Pydantic models
 │       ├── storage.py           # File upload handler
+│       ├── session_manager.py   # Session management logic
 │       └── clients/
 │           ├── faiss_client.py      # FAISS service client
 │           ├── gemini_client.py     # Google Gemini client

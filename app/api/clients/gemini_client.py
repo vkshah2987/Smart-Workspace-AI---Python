@@ -31,11 +31,28 @@ def embed_texts(texts: list):
 def embed_query(text: str):
     return embed_texts([text])[0]
 
-def generate_answer(query, contexts):
+def generate_answer(query, contexts, conversation_context=None):
     print("Gemini generating answer:")
+    
+    # Build prompt with optional conversation history
+    prompt_parts = []
+    
+    if conversation_context:
+        prompt_parts.append(conversation_context)
+    
+    prompt_parts.append(f"CONTEXTS:\n{contexts}")
+    prompt_parts.append(f"\nQUESTION: {query}")
+    
+    if conversation_context:
+        prompt_parts.append("\nProvide a response that takes into account the previous conversation. If the current question refers to previous messages (like 'it', 'that', 'the previous answer'), use the conversation history to understand the context. Answer concisely.")
+    else:
+        prompt_parts.append("\nAnswer concisely based on the provided contexts.")
+    
+    prompt = "\n".join(prompt_parts)
+    
     response = client.models.generate_content(
         model="gemini-2.5-flash",
-        contents=f"CONTEXTS:\n{contexts}\n\nQUESTION: {query}\nAnswer concisely.",
+        contents=prompt,
         config=types.GenerateContentConfig(
             thinking_config=types.ThinkingConfig(thinking_budget=0) # Disables thinking
         ),
